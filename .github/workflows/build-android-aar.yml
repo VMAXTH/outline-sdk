@@ -6,7 +6,6 @@ on:
 jobs:
   build-aar:
     runs-on: ubuntu-latest
-    # Готовый образ с Android SDK/NDK — не нужно ставить cmdline-tools вручную
     container:
       image: ghcr.io/cirruslabs/android-sdk:34
       options: --privileged
@@ -28,15 +27,20 @@ jobs:
           set -eux
           curl -sSL https://go.dev/dl/go1.22.7.linux-amd64.tar.gz -o /tmp/go.tgz
           rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz
-          echo "/usr/local/go/bin" >> $GITHUB_PATH
-          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Ensure SDK packages
         shell: bash
         run: |
           set -eux
-          yes | sdkmanager --licenses >/dev/null
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;${BUILD_TOOLS}" "ndk;${NDK_VERSION}"
+          # Лицензии могут отдавать SIGPIPE -> игнорируем
+          yes | sdkmanager --licenses >/dev/null || true
+          yes | sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;${BUILD_TOOLS}" \
+            "ndk;${NDK_VERSION}"
 
       - name: gomobile init
         shell: bash
@@ -54,7 +58,7 @@ jobs:
         run: |
           set -eux
           mkdir -p build/android
-          # Если у тебя не ./x/mobile – замени путь на свой пакет
+          # ЕСЛИ твой пакет не ./x/mobile — замени путь ниже:
           gomobile bind -target=android -androidapi "${ANDROID_API}" \
             -o build/android/outline.aar ./x/mobile
           ls -l build/android
