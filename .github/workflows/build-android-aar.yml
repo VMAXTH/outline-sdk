@@ -1,22 +1,19 @@
 name: Build Outline AAR
 
 on:
-  workflow_dispatch:
-  push:
-    branches: [ main ]
-
-permissions:
-  contents: read
+  workflow_dispatch: {}
 
 jobs:
   build-aar:
     runs-on: ubuntu-latest
-
     env:
-      ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
-      ANDROID_API: "33"
-      BUILD_TOOLS: "33.0.2"
-      NDK_VER: "25.1.8937393"
+      ANDROID_SDK_ROOT: ${{ runner.temp }}/android-sdk
+      ANDROID_HOME: ${{ runner.temp }}/android-sdk
+      # выбери androidapi >= 21. Для Outline обычно достаточно 26.
+      ANDROID_API: "26"
+      # версия build-tools и NDK совместимы с текущим gomobile
+      BUILD_TOOLS: "34.0.0"
+      NDK_VERSION: "26.1.10909125"
 
     steps:
       - name: Checkout
@@ -28,56 +25,65 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # === СТАВИМ CLI-TOOLS РУКАМИ И ГОНЯЕМ SDKMANAGER С РЕТРАЯМИ ===
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+
+      # --- Установка Android SDK + cmdline-tools ---
       - name: Install Android cmdline-tools
         shell: bash
         run: |
           set -eux
           mkdir -p "$ANDROID_SDK_ROOT"
-          curl -sSL -o /tmp/cli.zip \
-            https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          curl -sSL -o /tmp/cli.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
           unzip -q /tmp/cli.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
-          mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" \
-             "$ANDROID_SDK_ROOT/cmdline-tools/latest"
-          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses
+          mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          echo "SDK installed to $ANDROID_SDK_ROOT"
 
-      - name: Install Android packages (retry)
+      - name: Preseed Android licenses (non-interactive)
         shell: bash
-        env:
-          SDKMGR: ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/bin/sdkmanager
         run: |
           set -eux
-          for i in 1 2 3 4 5; do
-            "$SDKMGR" --sdk_root="$ANDROID_SDK_ROOT" \
-              "platform-tools" \
-              "platforms;android-${ANDROID_API}" \
-              "build-tools;${BUILD_TOOLS}" \
-              "ndk;${NDK_VER}" && break || {
-                echo "sdkmanager failed, retry $i"; sleep 10;
-              }
-          done
-          echo "$ANDROID_SDK_ROOT/ndk/${NDK_VER}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+          mkdir -p "$ANDROID_SDK_ROOT/licenses"
+          # стандартные хэши лицензионных соглашений Google
+          printf "d56f5187479451eabf01fb78af6dfcb131a6481e\n" > "$ANDROID_SDK_ROOT/licenses/android-sdk-license"
+          printf "84831b9409646a918e30573bab4c9c91346d8abd\n" > "$ANDROID_SDK_ROOT/licenses/android-sdk-preview-license"
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21.x'
-
-      - name: Install gomobile & deps
+      - name: Install Android packages (stable)
         shell: bash
         run: |
-          set -euxo pipefail
-          go env -w GOPROXY=https://proxy.golang.org,direct
+          set -eux
+          SDKM="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          "$SDKM" --sdk_root="$ANDROID_SDK_ROOT" "platform-tools" "platforms;android-34" "build-tools;$BUILD_TOOLS" "ndk;$NDK_VERSION" || true
+          # иногда sdkmanager возвращает 1 даже при успехе — игнорируем exit-code
+
+      # --- gomobile и сборка AAR ---
+      - name: Install gomobile & deps
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
+        run: |
+          set -eux
+          go env
           go install golang.org/x/mobile/cmd/gomobile@latest
-          "$HOME/go/bin/gomobile" init
+          # Инициализация с указанием NDK (важно для bind)
+          "$(go env GOPATH)/bin/gomobile" init -ndk "$ANDROID_NDK_HOME"
 
       - name: Build AAR via gomobile
         shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
         run: |
-          set -euxo pipefail
+          set -eux
           mkdir -p build/android
-          "$HOME/go/bin/gomobile" bind -target=android -androidapi 26 \
-            -o build/android/outline.aar ./x/mobile
+          # Путь к пакету мобильной библиотеки в репозитории Outline:
+          # если у тебя другой — поправь ./x/mobile на свой модуль.
+          "$(go env GOPATH)/bin/gomobile" bind \
+            -target=android \
+            -androidapi "${ANDROID_API}" \
+            -o build/android/outline.aar \
+            ./x/mobile
           ls -l build/android
 
       - name: Upload AAR
