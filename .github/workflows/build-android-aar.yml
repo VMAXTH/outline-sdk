@@ -6,7 +6,6 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Встроенный SDK в раннере GitHub
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
       ANDROID_API: "34"
       ANDROID_BUILD_TOOLS: "34.0.0"
@@ -34,11 +33,12 @@ jobs:
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
 
-      - name: Accept SDK licenses
+      # <-- фикс: игнорируем странный exit-code, лицензии всё равно принимаются
+      - name: Accept SDK licenses (CI-safe)
         shell: bash
         run: |
           set -eux
-          yes | sdkmanager --licenses --sdk_root="$ANDROID_SDK_ROOT"
+          yes | sdkmanager --licenses --sdk_root="$ANDROID_SDK_ROOT" || true
 
       - name: Install SDK packages
         shell: bash
@@ -49,7 +49,6 @@ jobs:
             "platforms;android-${ANDROID_API}" \
             "build-tools;${ANDROID_BUILD_TOOLS}" \
             "ndk;${ANDROID_NDK_VER}"
-
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${ANDROID_NDK_VER}" >> "$GITHUB_ENV"
           echo "$ANDROID_SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}" >> "$GITHUB_PATH"
@@ -70,7 +69,7 @@ jobs:
           gomobile version
           gomobile init -ndk "$ANDROID_NDK_HOME"
 
-      # Если пакет не ./x/mobile — поставь свой путь
+      # Поменяй ./x/mobile на свой пакет, если нужно
       - name: Build AAR
         shell: bash
         run: |
