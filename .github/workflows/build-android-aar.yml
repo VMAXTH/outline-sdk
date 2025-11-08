@@ -4,13 +4,19 @@ on:
   workflow_dispatch:
     inputs:
       pkg_path:
-        description: "Go-пакет для gomobile (например: ./x/mobileproxy)"
+        description: 'Go-пакет для gomobile (напр.: ./x/mobileproxy)'
         required: true
         default: ./x/mobileproxy
 
 jobs:
   build-aar:
     runs-on: ubuntu-latest
+
+    env:
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      GOPATH: ${{ github.workspace }}/go
+      GOMODCACHE: ${{ github.workspace }}/go/pkg/mod
 
     steps:
       - name: Checkout
@@ -20,93 +26,67 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
-      # Минимально поднимаем SDK; пакеты поставим вручную с ретраями
-      - name: Set up Android SDK (minimal)
+      - name: Set up Android SDK + NDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platforms;android-34
+            build-tools;34.0.0
+            cmdline-tools;latest
+            ndk;26.1.10909125
 
-      # Надёжная установка платформ, билд-тузов и NDK (с 5 попытками)
-      - name: Ensure SDK packages (robust)
+      - name: Accept SDK licenses (CI-safe)
         shell: bash
-        env:
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
-        run: |
-          set -euo pipefail
-          pkgs=(
-            "platform-tools"
-            "platforms;android-34"
-            "build-tools;34.0.0"
-            "ndk;26.1.10909125"
-          )
-          for i in {1..5}; do
-            yes | sdkmanager --licenses || true
-            if sdkmanager --install "${pkgs[@]}"; then
-              echo "OK: SDK packages installed"; break
-            fi
-            echo "sdkmanager failed (attempt $i). Retry…"
-            rm -f "${ANDROID_SDK_ROOT}/.knownPackages" || true
-            sleep $((i*15))
-            if [ $i -eq 5 ]; then echo "SDK installation failed"; exit 1; fi
-          done
-          echo "SDK root: ${ANDROID_SDK_ROOT}"
-          echo "Installed NDKs:"
-          ls -1 "${ANDROID_SDK_ROOT}/ndk" || true
+        run: yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: '1.22.x'
 
       - name: Install gomobile & gobind
         shell: bash
         run: |
-          set -euo pipefail
-          go env -w GOPROXY=https://proxy.golang.org,direct
+          go env -w GO111MODULE=on
+          go env -w GOPATH="${GOPATH}"
+          go env -w GOMODCACHE="${GOMODCACHE}"
+          # заранее вытянуть модули, чтобы gomobile не требовал go.sum
+          go mod download golang.org/x/mobile golang.org/x/tools
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
-          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+          echo "$GOPATH/bin" >> "$GITHUB_PATH"
 
       - name: gomobile init
         shell: bash
-        env:
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
         run: |
-          set -euo pipefail
-          NDK_DIR="$(ls -1 "${ANDROID_SDK_ROOT}/ndk" | head -n1)"
-          if [ -z "$NDK_DIR" ]; then
-            echo "NDK not found in ${ANDROID_SDK_ROOT}/ndk"; exit 1
-          fi
-          export ANDROID_NDK_HOME="${ANDROID_SDK_ROOT}/ndk/${NDK_DIR}"
-          export NDK_HOME="${ANDROID_NDK_HOME}"
-          echo "Using NDK: ${ANDROID_NDK_HOME}"
+          set -eux
+          # найти установленный NDK
+          NDK_DIR="$(ls -d ${ANDROID_HOME}/ndk/* | sort -V | tail -1)"
           gomobile version || true
-          gomobile init -ndk "${ANDROID_NDK_HOME}"
+          gomobile init -ndk "${NDK_DIR}"
 
-      # Если у выбранного пакета есть go.mod — подчистим зависимости
-      - name: Tidy module (if pkg has go.mod)
+      # Если у пакета есть go.mod — привести зависимости (не критично)
+      - name: Tidy module (если есть подпакет x/mobile)
         shell: bash
         run: |
-          set -euo pipefail
-          PKG="${{ inputs.pkg_path }}"
-          if [ -f "${PKG}/go.mod" ]; then
-            (cd "${PKG}" && go mod tidy)
+          if [ -f "${{ inputs.pkg_path }}/go.mod" ]; then
+            pushd "${{ inputs.pkg_path }}"
+            go mod tidy
+            popd
           fi
 
       - name: Build AAR via gomobile bind
         shell: bash
         run: |
-          set -euo pipefail
+          set -eux
           mkdir -p build/android
-          gomobile bind -target=android -androidapi 26 \
-            -o build/android/outline.aar \
-            "${{ inputs.pkg_path }}"
-          ls -l build/android
+          gomobile bind -target=android -androidapi 26 -o build/android/outline.aar "${{ inputs.pkg_path }}"
+          ls -lah build/android
 
       - name: Upload AAR
-        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: outline.aar
+          name: outline-aar
           path: build/android/outline.aar
-          if-no-files-found: error
