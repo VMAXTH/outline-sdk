@@ -2,6 +2,11 @@ name: Build Android AAR
 
 on:
   workflow_dispatch:
+    inputs:
+      pkg_path:
+        description: Go-пакет для gomobile (напр.: ./x/mobileproxy)
+        required: true
+        default: ./x/mobileproxy
 
 jobs:
   build-aar:
@@ -17,27 +22,14 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
+      - name: Set up Android SDK + NDK
         uses: android-actions/setup-android@v3
-
-      - name: Install SDK packages
-        shell: bash
-        run: |
-          set -eux
-          yes | sdkmanager --licenses || true
-          sdkmanager --install \
-            "platform-tools" \
-            "platforms;android-34" \
-            "build-tools;34.0.0" \
-            "ndk;26.1.10909125"
-
-      - name: Export ANDROID_* envs
-        shell: bash
-        run: |
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
-          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
-          echo "$ANDROID_SDK_ROOT/build-tools/34.0.0" >> $GITHUB_PATH
+        with:
+          packages: |
+            platform-tools
+            platforms;android-34
+            build-tools;34.0.0
+            ndk;26.1.10909125
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -48,37 +40,34 @@ jobs:
         shell: bash
         run: |
           set -eux
-          go env -w GO111MODULE=on GOPROXY=https://proxy.golang.org,direct
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          export ANDROID_HOME="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          "$(go env GOPATH)"/bin/gomobile init
 
-      - name: gomobile init
-        env:
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+      - name: Tidy go.mod в пакете (если есть)
         shell: bash
         run: |
           set -eux
-          gomobile version
-          gomobile init
+          if [ -d "${{ github.event.inputs.pkg_path }}" ]; then
+            pushd "${{ github.event.inputs.pkg_path }}"
+            go mod tidy || true
+            popd
+          fi
 
-      # ВАЖНО: привести в порядок модуль и включить тег 'mobile'
-      - name: Tidy module + bind
-        env:
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+      - name: Build AAR via gomobile bind
         shell: bash
         run: |
           set -eux
-          pushd x/mobile
-          go mod tidy
-          popd
           mkdir -p build/android
-          gomobile bind -target=android -androidapi 26 -tags mobile -o build/android/outline.aar ./x/mobile
+          export ANDROID_HOME="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          "$(go env GOPATH)"/bin/gomobile bind \
+            -target=android -androidapi 26 \
+            -o build/android/outline.aar \
+            "${{ github.event.inputs.pkg_path }}"
 
       - name: Upload AAR
         uses: actions/upload-artifact@v4
         with:
-          name: outline-aar
-          path: build/android/*.aar
+          name: outline.aar
+          path: build/android/outline.aar
