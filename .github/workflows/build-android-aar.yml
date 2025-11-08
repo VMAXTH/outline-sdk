@@ -1,67 +1,101 @@
-name: Build Outline AAR (container)
+name: Build Outline AAR
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 jobs:
   build-aar:
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/cirruslabs/android-sdk:34
-      options: --privileged
 
     env:
-      ANDROID_SDK_ROOT: /opt/android-sdk
-      ANDROID_HOME: /opt/android-sdk
-      ANDROID_API: "26"
+      ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+      ANDROID_HOME: ${{ github.workspace }}/android-sdk
+      NDK_VERSION: "25.1.8937393"
+      ANDROID_API: "34"
       BUILD_TOOLS: "34.0.0"
-      NDK_VERSION: "26.1.10909125"
+      GO_VERSION: "1.22.x"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Go 1.22
-        shell: bash
-        run: |
-          set -eux
-          curl -sSL https://go.dev/dl/go1.22.7.linux-amd64.tar.gz -o /tmp/go.tgz
-          rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz
-          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
-      - name: Ensure SDK packages
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Prepare Android cmdline-tools
         shell: bash
         run: |
-          set -eux
-          # Лицензии могут отдавать SIGPIPE -> игнорируем
-          yes | sdkmanager --licenses >/dev/null || true
-          yes | sdkmanager --install \
-            "platform-tools" \
-            "platforms;android-34" \
-            "build-tools;${BUILD_TOOLS}" \
+          set -euxo pipefail
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          cd "$ANDROID_SDK_ROOT"
+          # Скачиваем официальные commandline-tools
+          curl -sSL -o cmdtools.zip "https://dl.google.com/android/repository/commandlinetools-linux-11076702_latest.zip"
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          unzip -q cmdtools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          rm -f cmdtools.zip
+          # Путь к sdkmanager/avdmanager
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+
+      - name: Install SDK packages (robust)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --version
+          # Принимаем лицензии (sdkmanager иногда шлёт SIGPIPE -> exit 141) — игнорируем и повторяем
+          for i in 1 2; do
+            yes | sdkmanager --licenses --sdk_root="$ANDROID_SDK_ROOT" || true
+          done
+          # Ставим фиксированные версии
+          pkgs=(
+            "platform-tools"
+            "platforms;android-${ANDROID_API}"
+            "build-tools;${BUILD_TOOLS}"
             "ndk;${NDK_VERSION}"
+          )
+          for p in "${pkgs[@]}"; do
+            # повтор, чтобы поймать сетевые/репо глюки
+            until sdkmanager --sdk_root="$ANDROID_SDK_ROOT" "$p"; do sleep 5; done
+          done
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
+
+      - name: Install gomobile/gobind
+        shell: bash
+        run: |
+          set -euxo pipefail
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          echo "${HOME}/go/bin" >> $GITHUB_PATH
 
       - name: gomobile init
         shell: bash
         env:
-          ANDROID_NDK_HOME: /opt/android-sdk/ndk/${{ env.NDK_VERSION }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
         run: |
-          set -eux
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          gomobile init -ndk "$ANDROID_NDK_HOME"
+          set -euxo pipefail
+          gomobile init -ndk "${ANDROID_NDK_HOME}"
 
-      - name: Build AAR
+      - name: Build AAR via gomobile bind
         shell: bash
         env:
-          ANDROID_NDK_HOME: /opt/android-sdk/ndk/${{ env.NDK_VERSION }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
         run: |
-          set -eux
+          set -euxo pipefail
           mkdir -p build/android
-          # ЕСЛИ твой пакет не ./x/mobile — замени путь ниже:
-          gomobile bind -target=android -androidapi "${ANDROID_API}" \
-            -o build/android/outline.aar ./x/mobile
-          ls -l build/android
+          # Пакет Outline находится в ./x/mobile — если путь другой, поправь.
+          gomobile bind \
+            -target=android \
+            -androidapi 26 \
+            -o build/android/outline.aar \
+            ./x/mobile
+          ls -lah build/android
 
       - name: Upload AAR
         uses: actions/upload-artifact@v4
