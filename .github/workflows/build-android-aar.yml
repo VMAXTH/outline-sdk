@@ -4,14 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       pkg_path:
-        description: 'Go-пакет для gomobile (напр.: ./x/mobileproxy)'
+        description: 'Go-пакет для gomobile (пример: ./x/mobileproxy)'
         required: true
         default: ./x/mobileproxy
 
 jobs:
   build-aar:
     runs-on: ubuntu-latest
-
     env:
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
       ANDROID_HOME: /usr/local/lib/android/sdk
@@ -22,26 +21,43 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      - name: Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK + NDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: |
-            platforms;android-34
-            build-tools;34.0.0
-            cmdline-tools;latest
-            ndk;26.1.10909125
-
-      - name: Accept SDK licenses (CI-safe)
+      # --- РУЧНАЯ УСТАНОВКА ANDROID SDK/NDK (без flaky-экшена) ---
+      - name: Install cmdline-tools + SDK + NDK (robust)
         shell: bash
-        run: yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses || true
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y unzip curl
 
-      - name: Set up Go
+          mkdir -p "${ANDROID_SDK_ROOT}/cmdline-tools"
+          # актуальный пакет командной строки
+          CT_URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+          curl -fsSL "${CT_URL}" -o /tmp/cmdline-tools.zip
+          unzip -q /tmp/cmdline-tools.zip -d "${ANDROID_SDK_ROOT}/cmdline-tools"
+          mv "${ANDROID_SDK_ROOT}/cmdline-tools/cmdline-tools" "${ANDROID_SDK_ROOT}/cmdline-tools/latest"
+
+          SDKMGR="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+
+          yes | "${SDKMGR}" --licenses || true
+
+          # Несколько попыток — sdkmanager иногда фэйлится сетью
+          for i in 1 2 3; do
+            "${SDKMGR}" --sdk_root="${ANDROID_SDK_ROOT}" \
+              "platform-tools" \
+              "platforms;android-34" \
+              "build-tools;34.0.0" \
+              "ndk;26.1.10909125" && break || sleep 20
+          done
+
+          "${ANDROID_SDK_ROOT}/platform-tools/adb" --version || true
+
+      - name: Go 1.22
         uses: actions/setup-go@v5
         with:
           go-version: '1.22.x'
@@ -52,32 +68,27 @@ jobs:
           go env -w GO111MODULE=on
           go env -w GOPATH="${GOPATH}"
           go env -w GOMODCACHE="${GOMODCACHE}"
-          # заранее вытянуть модули, чтобы gomobile не требовал go.sum
           go mod download golang.org/x/mobile golang.org/x/tools
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
-          echo "$GOPATH/bin" >> "$GITHUB_PATH"
+          echo "${GOPATH}/bin" >> "$GITHUB_PATH"
 
       - name: gomobile init
         shell: bash
         run: |
           set -eux
-          # найти установленный NDK
-          NDK_DIR="$(ls -d ${ANDROID_HOME}/ndk/* | sort -V | tail -1)"
+          NDK_DIR="$(ls -d ${ANDROID_SDK_ROOT}/ndk/* | sort -V | tail -1)"
           gomobile version || true
           gomobile init -ndk "${NDK_DIR}"
 
-      # Если у пакета есть go.mod — привести зависимости (не критично)
-      - name: Tidy module (если есть подпакет x/mobile)
+      - name: Tidy (если у пакета есть go.mod)
         shell: bash
         run: |
           if [ -f "${{ inputs.pkg_path }}/go.mod" ]; then
-            pushd "${{ inputs.pkg_path }}"
-            go mod tidy
-            popd
+            (cd "${{ inputs.pkg_path }}" && go mod tidy)
           fi
 
-      - name: Build AAR via gomobile bind
+      - name: gomobile bind → AAR
         shell: bash
         run: |
           set -eux
