@@ -5,54 +5,31 @@ on:
 jobs:
   build-aar:
     runs-on: ubuntu-latest
-    env:
-      ANDROID_API: 26
-      GOFLAGS: "-buildvcs=false"
-      CGO_ENABLED: "1"
+
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.22.x"
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: 17
 
-      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platform-tools
+            platforms;android-34
+            build-tools;34.0.0
 
-      - name: Install SDK components
+      - name: Build AAR
         run: |
-          set -eux
-          yes | sdkmanager --licenses
-          sdkmanager --install \
-            "platform-tools" \
-            "platforms;android-${ANDROID_API}" \
-            "build-tools;34.0.0" \
-            "ndk;26.1.10909125"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
-          echo "$ANDROID_SDK_ROOT/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
-          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
-
-      - name: Install gomobile & deps
-        run: |
-          set -eux
-          go env -w GOPROXY=https://proxy.golang.org,direct
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go get     golang.org/x/mobile/bind@latest
-          gomobile init
-
-      - name: Build AAR via project script
-        run: |
-          set -eux
-          chmod +x ./run_on_android.sh
-          bash -x ./run_on_android.sh aar
-          ls -l build/android
+          cd x/android
+          chmod +x gradlew
+          ./gradlew :lib:assembleRelease --no-daemon --stacktrace
 
       - name: Upload AAR
         uses: actions/upload-artifact@v4
         with:
           name: outline-aar
-          path: build/android/outline.aar
+          path: x/android/lib/build/outputs/aar/lib-release.aar
