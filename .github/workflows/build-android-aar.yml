@@ -1,73 +1,14 @@
-name: Build Android AAR
-
+name: Ping
 on:
   workflow_dispatch:
     inputs:
-      pkg_path:
-        description: Go-пакет для gomobile (напр.: ./x/mobileproxy)
-        required: true
-        default: ./x/mobileproxy
+      msg:
+        description: Message
+        required: false
+        default: hi
 
 jobs:
-  build-aar:
+  ping:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up Android SDK + NDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: |
-            platform-tools
-            platforms;android-34
-            build-tools;34.0.0
-            ndk;26.1.10909125
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22.x'
-
-      - name: Install gomobile & gobind
-        shell: bash
-        run: |
-          set -eux
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
-          export ANDROID_HOME="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          "$(go env GOPATH)"/bin/gomobile init
-
-      - name: Tidy go.mod в пакете (если есть)
-        shell: bash
-        run: |
-          set -eux
-          if [ -d "${{ github.event.inputs.pkg_path }}" ]; then
-            pushd "${{ github.event.inputs.pkg_path }}"
-            go mod tidy || true
-            popd
-          fi
-
-      - name: Build AAR via gomobile bind
-        shell: bash
-        run: |
-          set -eux
-          mkdir -p build/android
-          export ANDROID_HOME="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          "$(go env GOPATH)"/bin/gomobile bind \
-            -target=android -androidapi 26 \
-            -o build/android/outline.aar \
-            "${{ github.event.inputs.pkg_path }}"
-
-      - name: Upload AAR
-        uses: actions/upload-artifact@v4
-        with:
-          name: outline.aar
-          path: build/android/outline.aar
+      - run: echo "OK ${{ inputs.msg }}"
