@@ -16,13 +16,16 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      # принять лицензии и дотянуть нужные пакеты через уже установленный sdkmanager
-      - name: Prepare Android SDK
+      - name: Prepare Android SDK (без setup-android action)
         run: |
-          yes | sudo $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses || true
-          yes | sudo $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" || true
+          SDKMGR="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          echo "sdkmanager = $SDKMGR"
+          yes | sudo $SDKMGR --licenses || true
+          # если 34 не доступен – заменишь ниже на 33.0.2 и platforms;android-33
+          yes | sudo $SDKMGR "platforms;android-34" "build-tools;34.0.0" || true
+          $SDKMGR --list | head -n 50 || true
 
-      - name: Build AAR (Gradle)
+      - name: Build AAR
         working-directory: x/android
         run: |
           chmod +x gradlew
