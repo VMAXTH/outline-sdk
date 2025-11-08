@@ -3,15 +3,20 @@ name: Build Outline AAR
 on:
   workflow_dispatch:
   push:
-    paths:
-      - 'x/**'
-      - '**/*.go'
-      - 'run_on_android.sh'
-      - '.github/workflows/build-android-aar.yml'
+    branches: [ main ]
+
+permissions:
+  contents: read
 
 jobs:
   build-aar:
     runs-on: ubuntu-latest
+
+    env:
+      ANDROID_API: "33"
+      BUILD_TOOLS: "33.0.2"
+      NDK_VER: "25.1.8937393"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,34 +25,55 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
-      - name: Prepare Android SDK
+      # СТАБИЛЬНАЯ установка SDK: API 33 + build-tools 33.0.2 + NDK 25.1
+      - name: Prepare Android SDK (stable)
         uses: android-actions/setup-android@v3
         with:
           packages: |
-            platforms;android-34
-            build-tools;34.0.0
+            platforms;android-${{ env.ANDROID_API }}
+            build-tools;${{ env.BUILD_TOOLS }}
             platform-tools
+            ndk;${{ env.NDK_VER }}
+
+      - name: Accept licenses (retry)
+        shell: bash
+        run: |
+          set -e
+          for i in 1 2 3; do
+            yes | sdkmanager --licenses && break || sleep 5
+          done
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VER}" >> $GITHUB_ENV
+          echo "$ANDROID_SDK_ROOT/ndk/${NDK_VER}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22.x'
+          go-version: '1.21.x'
 
       - name: Install gomobile & deps
+        shell: bash
         run: |
+          set -euxo pipefail
           go env -w GOPROXY=https://proxy.golang.org,direct
-          go install golang.org/x/mobile/cmd/gobind@latest
           go install golang.org/x/mobile/cmd/gomobile@latest
-          echo "$HOME/go/bin" >> "$GITHUB_PATH"
-          gomobile init
+          # инициализация gomobile (под Android)
+          "$HOME/go/bin/gomobile" init
 
-      - name: Build AAR via project script
-        run: bash ./run_on_android.sh aar
+      # Сборка AAR напрямую через gomobile (без эмулятора и adb)
+      - name: Build AAR via gomobile
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p build/android
+          "$HOME/go/bin/gomobile" bind -target=android -androidapi 26 \
+            -o build/android/outline.aar ./x/mobile
+          ls -l build/android
 
       - name: Upload AAR
         uses: actions/upload-artifact@v4
         with:
           name: outline-aar
           path: build/android/outline.aar
+          if-no-files-found: error
