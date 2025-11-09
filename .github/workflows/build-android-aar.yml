@@ -8,15 +8,21 @@ on:
         required: true
         default: ./x/mobileproxy
 
-env:
-  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-  ANDROID_NDK_VERSION: 26.1.10909125
-  ANDROID_API: 34
-  BUILD_TOOLS: 34.0.0
-
 jobs:
   build-aar:
     runs-on: ubuntu-latest
+
+    env:
+      ANDROID_SDK_ROOT: ${{ github.workspace }}/.android-sdk
+      ANDROID_HOME: ${{ github.workspace }}/.android-sdk
+      # версию NDK можно поменять при необходимости
+      ANDROID_NDK_VERSION: "26.1.10909125"
+      # что будем ставить из sdkmanager
+      ANDROID_PACKAGES: >-
+        platform-tools
+        platforms;android-34
+        build-tools;34.0.0
+        ndk;26.1.10909125
 
     steps:
       - name: Checkout
@@ -26,76 +32,100 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: 17
 
       - name: Set up Go 1.22
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: "1.22.x"
 
-      # ---------- SDK: базовые директории ----------
-      - name: Prepare SDK folders
+      - name: Prepare folders
         shell: bash
         run: |
           set -eux
-          sudo mkdir -p "$ANDROID_SDK_ROOT"
-          sudo chown -R "$USER":"$USER" "$ANDROID_SDK_ROOT"
-          mkdir -p "$ANDROID_SDK_ROOT"/{cmdline-tools,platforms,platform-tools,build-tools,ndk}
-          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
-          echo "$ANDROID_SDK_ROOT/emulator" >> $GITHUB_PATH
+          mkdir -p "$ANDROID_SDK_ROOT" "$ANDROID_SDK_ROOT/cmdline-tools"
 
-      # ---------- cmdline-tools: устойчивое скачивание ----------
-      - name: Install cmdline-tools (resilient)
+      ##########################################################################
+      # Ручная установка cmdline-tools (без нестабильных экшенов)
+      ##########################################################################
+      - name: Install cmdline-tools (latest)
         shell: bash
         run: |
           set -eux
-          cd "$ANDROID_SDK_ROOT"
-          mkdir -p cmdline-tools/latest
-          # от свежих к более старым
-          for v in 11076702 10406996 9477386 9123335 8512546 8092744; do
-            url="https://dl.google.com/android/repository/commandlinetools-linux-${v}_latest.zip"
-            echo "Trying $url"
-            if curl -fSL "$url" -o /tmp/cmdtools.zip; then
-              unzip -q /tmp/cmdtools.zip -d cmdline-tools/latest
-              rm -f /tmp/cmdtools.zip
-              break
+          cd /tmp
+
+          # Несколько «кандидатов» на актуальный архив Google.
+          # Если первый 404 — берём следующий.
+          try_urls=(
+            "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+            "https://dl.google.com/android/repository/commandlinetools-linux-11076702_latest.zip"
+            "https://dl.google.com/android/repository/commandlinetools-linux-10406996_latest.zip"
+          )
+
+          ok=""
+          for u in "${try_urls[@]}"; do
+            echo ">>> пробуем $u"
+            if curl -fsSL "$u" -o cmdtools.zip; then
+              if unzip -t q cmdtools.zip >/dev/null 2>&1; then
+                ok="yes"
+                break
+              fi
             fi
           done
-          test -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ -z "$ok" ]; then
+            echo "Не удалось скачать commandlinetools (Google обновил номер). Обнови URL в workflow."
+            exit 1
+          fi
+
+          rm -rf "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          unzip -q cmdtools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          # На некоторых архивах внутри папка называется cmdline-tools, нормализуем:
+          if [ -d "$ANDROID_SDK_ROOT/cmdline-tools/latest/cmdline-tools" ]; then
+            mv "$ANDROID_SDK_ROOT/cmdline-tools/latest/cmdline-tools/"* "$ANDROID_SDK_ROOT/cmdline-tools/latest/" || true
+            rmdir "$ANDROID_SDK_ROOT/cmdline-tools/latest/cmdline-tools" || true
+          fi
+
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
 
-      # ---------- Пакеты SDK с ретраями ----------
-      - name: Accept SDK licenses (CI-safe)
+      ##########################################################################
+      # Самое важное — лицензии. Подаём бесконечный поток 'y', чтобы не было
+      # «Broken pipe» и падения на 10% Computing updates…
+      ##########################################################################
+      - name: Accept SDK licenses (robust)
         shell: bash
         run: |
           set -eux
-          yes | sdkmanager --licenses > /dev/null
+          feed_yes() { while true; do printf 'y\n'; sleep 0.2; done; }
+          # иногда sdkmanager закрывает stdin по ходу, поэтому допускаем ненулевой возврат
+          feed_yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses || true
 
-      - name: Install SDK packages (robust)
+      - name: Install Android packages (retry, robust)
         shell: bash
         run: |
           set -eux
-          pkgs=(
-            "platform-tools"
-            "platforms;android-${ANDROID_API}"
-            "build-tools;${BUILD_TOOLS}"
-            "ndk;${ANDROID_NDK_VERSION}"
-          )
-          for p in "${pkgs[@]}"; do
-            echo "Installing $p"
-            n=0
-            until sdkmanager "$p"; do
-              n=$((n+1))
-              if [ $n -ge 5 ]; then
-                echo "Failed to install $p after $n attempts" >&2
-                exit 1
-              fi
-              sleep 5
-            done
+          feed_yes() { while true; do printf 'y\n'; sleep 0.2; done; }
+
+          # несколько попыток — на CI зеркала Google иногда хлопают
+          tries=0
+          until feed_yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" ${ANDROID_PACKAGES}; do
+            tries=$((tries+1))
+            [ $tries -ge 3 ] && { echo "sdkmanager провалился 3 раза"; exit 1; }
+            echo "Повтор через 5 секунд…"
+            sleep 5
           done
-          echo "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS}" >> $GITHUB_PATH
 
-      # ---------- Go инструменты ----------
+      - name: Export ANDROID_NDK_* envs
+        id: ndk
+        shell: bash
+        run: |
+          set -eux
+          ndk_dir="$(ls -d "$ANDROID_SDK_ROOT/ndk/"* | sort -V | tail -1)"
+          echo "NDK_DIR=$ndk_dir" >> $GITHUB_ENV
+          echo "$ndk_dir/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
       - name: Install gomobile & gobind
         shell: bash
         run: |
@@ -103,27 +133,25 @@ jobs:
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
-          go env
 
-      # ---------- gomobile init с явным NDK ----------
       - name: gomobile init
         shell: bash
+        env:
+          NDK_DIR: ${{ env.NDK_DIR }}
         run: |
           set -eux
           gomobile version || true
-          gomobile init -ndk "$ANDROID_SDK_ROOT/ndk/${ANDROID_NDK_VERSION}"
+          gomobile init -ndk "$NDK_DIR"
 
-      # ---------- Если в пакете есть go.mod — tidy ----------
-      - name: Tidy module (if pkg has go.mod)
+      - name: Tidy module (если есть go.mod)
+        if: ${{ hashFiles(format('{0}/go.mod', inputs.pkg_path)) != '' }}
         shell: bash
         run: |
           set -eux
-          PKG_PATH="${{ inputs.pkg_path }}"
-          if [ -f "$PKG_PATH/go.mod" ]; then
-            ( cd "$PKG_PATH" && go mod tidy )
-          fi
+          pushd "${{ inputs.pkg_path }}"
+          go mod tidy
+          popd
 
-      # ---------- Сборка AAR ----------
       - name: Build AAR via gomobile bind
         shell: bash
         run: |
@@ -131,15 +159,13 @@ jobs:
           mkdir -p build/android
           gomobile bind \
             -target=android \
-            -androidapi $ANDROID_API \
+            -androidapi=26 \
             -o build/android/outline.aar \
             "${{ inputs.pkg_path }}"
-          ls -l build/android
 
-      # ---------- Артефакт ----------
       - name: Upload AAR
         uses: actions/upload-artifact@v4
         with:
-          name: outline-aar
+          name: outline.aar
           path: build/android/outline.aar
           if-no-files-found: error
