@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       pkg_path:
-        description: "Go-пакет для gomobile (например: ./x/mobileproxy)"
+        description: "Go пакет для gomobile (например: ./x/mobileproxy)"
         required: true
         default: ./x/mobileproxy
 
@@ -99,22 +99,22 @@ jobs:
       - name: ANDROID_NDK_HOME
         run: echo "ANDROID_NDK_HOME=${{ steps.ndk.outputs.path }}" >> $GITHUB_ENV
 
-      - name: Install gomobile & gobind (pinned)
+      # >>> ВАЖНО: используем существующую версию — latest
+      - name: Install gomobile & gobind (latest)
         shell: bash
         run: |
           set -euxo pipefail
-          # стабильная ветка; при необходимости поменяй хэш/тег на рабочий для твоего кода
-          go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20240709-6e0f08c
-          go install golang.org/x/mobile/cmd/gobind@v0.0.0-20240709-6e0f08c
+          go env -w GOINSECURE=golang.org  # на всякий случай не нужен, можно убрать
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
           gomobile version || true
 
-      - name: gomobile init (без -ndk)
+      - name: gomobile init
         shell: bash
         run: |
           set -euxo pipefail
-          # современный gomobile сам берёт NDK из ANDROID_NDK_HOME/ANDROID_SDK_ROOT
-          gomobile init
+          gomobile init   # без -ndk — он берёт из ANDROID_NDK_HOME
 
       - name: go mod tidy (if present)
         shell: bash
