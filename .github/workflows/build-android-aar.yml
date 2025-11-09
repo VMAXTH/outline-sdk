@@ -47,21 +47,30 @@ jobs:
           sudo chown -R "$USER":"$USER" "$ANDROID_SDK_ROOT"
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
 
-      - name: Install cmdline-tools (latest)
+            - name: Install cmdline-tools (resilient)
         shell: bash
         run: |
           set -eux
           cd "$ANDROID_SDK_ROOT"
           mkdir -p cmdline-tools/latest
-          curl -fsSL \
-            https://dl.google.com/android/repository/commandlinetools-linux-11076702_latest.zip \
-            -o /tmp/cmdtools.zip
-          unzip -q /tmp/cmdtools.zip -d cmdline-tools/latest
-          rm -f /tmp/cmdtools.zip
+          # Список известных рабочих билдов, от нового к старым
+          for v in 11076702 10406996 9477386 9123335 8512546 8092744; do
+            url="https://dl.google.com/android/repository/commandlinetools-linux-${v}_latest.zip"
+            echo "Trying $url"
+            if curl -fSL "$url" -o /tmp/cmdtools.zip; then
+              unzip -q /tmp/cmdtools.zip -d cmdline-tools/latest
+              rm -f /tmp/cmdtools.zip
+              echo "Downloaded cmdline-tools build $v"
+              break
+            fi
+          done
+          # Проверка что распаковалось
+          test -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
           echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
           echo "$ANDROID_SDK_ROOT/emulator" >> $GITHUB_PATH
           echo "$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS" >> $GITHUB_PATH
+
 
       - name: Accept SDK licenses (retry)
         shell: bash
