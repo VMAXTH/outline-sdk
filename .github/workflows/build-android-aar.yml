@@ -11,18 +11,13 @@ on:
 jobs:
   build-aar:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     env:
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: ${{ runner.temp }}/android-sdk
+      ANDROID_HOME: ${{ runner.temp }}/android-sdk
+      NDK_VERSION: 26.1.10909125
+      ANDROID_API: 34
       AAR_OUT: build/android/outline.aar
-      # что ставим через sdkmanager
-      ANDROID_PKGS: >
-        platform-tools
-        platforms;android-34
-        build-tools;34.0.0
-        ndk;26.1.10909125
 
     steps:
       - name: Checkout
@@ -39,117 +34,105 @@ jobs:
         with:
           go-version: "1.22.x"
 
+      # --- Android SDK / cmdline-tools (надёжно) ---
       - name: Prepare SDK folders
         shell: bash
         run: |
           set -eux
-          sudo mkdir -p "$ANDROID_SDK_ROOT"
-          sudo chown -R "$USER":"$USER" "$ANDROID_SDK_ROOT"
-          mkdir -p "$ANDROID_SDK_ROOT"/{cmdline-tools,platforms,platform-tools,build-tools,ndk}
-          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
-          echo "$ANDROID_SDK_ROOT/platform-tools"          >> $GITHUB_PATH
+          mkdir -p "$ANDROID_SDK_ROOT"/{cmdline-tools/latest,platforms,platform-tools,build-tools,ndk}
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
 
       - name: Install cmdline-tools (resilient)
         shell: bash
         run: |
           set -eux
           cd "$ANDROID_SDK_ROOT"
-
-          # Пробуем несколько актуальных архивов cmdline-tools (Google меняет номер).
-          try_urls=(
-            "https://dl.google.com/android/repository/commandlinetools-linux-11076966_latest.zip"
+          urls=(
+            "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
             "https://dl.google.com/android/repository/commandlinetools-linux-11076702_latest.zip"
-            "https://dl.google.com/android/repository/commandlinetools-linux-11076768_latest.zip"
-            "https://dl.google.com/android/repository/commandlinetools-linux-11079608_latest.zip"
-            "https://dl.google.com/android/repository/commandlinetools-linux-11070840_latest.zip"
+            "https://dl.google.com/android/repository/commandlinetools-linux-11079641_latest.zip"
             "https://dl.google.com/android/repository/commandlinetools-linux-10406996_latest.zip"
           )
-
-          ok=false
-          for u in "${try_urls[@]}"; do
-            echo ">>> пробуем $u"
-            if curl -fSsL "$u" -o /tmp/cmdtools.zip; then
-              ok=true; break
-            fi
+          ok=
+          for u in "${urls[@]}"; do
+            echo ">> try $u"
+            if curl -fsSL "$u" -o /tmp/cmdtools.zip; then ok=1; break; fi
           done
-          if [ "$ok" != true ]; then
-            echo "Не удалось скачать commandlinetools. Обнови список URL выше."
-            exit 1
-          fi
-
-          rm -rf cmdline-tools/latest
-          mkdir -p cmdline-tools/latest
-          unzip -q /tmp/cmdtools.zip -d cmdline-tools/latest
-          # В некоторых архивах внутри папка cmdline-tools — поправим структуру
-          if [ -d cmdline-tools/latest/cmdline-tools ]; then
-            mv cmdline-tools/latest/cmdline-tools/* cmdline-tools/latest/
-            rmdir cmdline-tools/latest/cmdline-tools
-          fi
-          sdkmanager --version
+          [ -n "$ok" ]
+          unzip -q /tmp/cmdtools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools/latest"
 
       - name: Accept SDK licenses (CI-safe)
         shell: bash
         run: |
           set -eux
-          # подадим ограниченное число 'y', чтобы не висело и не сыпало broken pipe
-          (for i in $(seq 1 200); do echo y; done) \
-            | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses >/dev/null 2>&1 || true
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses || true
 
       - name: Install SDK packages (robust)
         shell: bash
         run: |
           set -eux
-          tries=0
-          until (for i in $(seq 1 200); do echo y; done) \
-              | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" ${ANDROID_PKGS} >/dev/null 2>&1
-          do
-            tries=$((tries+1))
-            [ $tries -ge 3 ] && { echo "sdkmanager провалился 3 раза"; exit 1; }
-            echo "Повтор через 5 секунд…"; sleep 5
+          sdk="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          # без --update, сразу нужные пакеты
+          pkgs=(
+            "platform-tools"
+            "platforms;android-${ANDROID_API}"
+            "build-tools;34.0.0"
+            "ndk;${NDK_VERSION}"
+          )
+          for i in {1..3}; do
+            if yes | "$sdk" "${pkgs[@]}"; then exit 0; fi
+            echo "retry $i..."
+            sleep 3
           done
+          exit 1
 
       - name: Find installed NDK
         id: ndk
         shell: bash
         run: |
           set -eux
-          ndk_dir=$(ls -d "$ANDROID_SDK_ROOT/ndk/"*/ | sort -V | tail -1 | tr -d '/')
-          echo "NDK_DIR=$ndk_dir" >> $GITHUB_ENV
-          echo "ndk=$ndk_dir" >> $GITHUB_OUTPUT
+          ndk_dir="$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}"
+          test -d "$ndk_dir"
+          echo "path=$ndk_dir" >> "$GITHUB_OUTPUT"
 
+      # --- gomobile / gobind ---
       - name: Install gomobile & gobind
         shell: bash
         run: |
           set -eux
+          GOBIN="$(go env GOPATH)/bin"
+          echo "$GOBIN" >> "$GITHUB_PATH"
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
-          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
-          gomobile version || true
+          "$GOBIN/gomobile" version || true
 
-      - name: gomobile init
+      - name: gomobile init (use Android SDK)
         shell: bash
         run: |
           set -eux
-          gomobile init -ndk "$NDK_DIR"
+          GOBIN="$(go env GOPATH)/bin"
+          "$GOBIN/gomobile" init -androidsdk "$ANDROID_SDK_ROOT"
 
+      # --- проект ---
       - name: Tidy module (if pkg has go.mod)
         shell: bash
         run: |
           set -eux
-          PKG="${{ github.event.inputs.pkg_path }}"
-          if [ -f "$PKG/go.mod" ]; then
-            pushd "$PKG"
-            go mod tidy
-            popd
-          fi
+          if [ -f go.mod ]; then go mod tidy; fi
+          if [ -f "${{ inputs.pkg_path }}/go.mod" ]; then (cd "${{ inputs.pkg_path }}" && go mod tidy); fi
 
       - name: Build AAR via gomobile bind
         shell: bash
         run: |
           set -eux
           mkdir -p "$(dirname "$AAR_OUT")"
-          gomobile bind -target=android -androidapi 26 -o "$AAR_OUT" "${{ github.event.inputs.pkg_path }}"
-          test -f "$AAR_OUT"
+          GOBIN="$(go env GOPATH)/bin"
+          "$GOBIN/gomobile" bind \
+            -target=android \
+            -androidapi 26 \
+            -o "$AAR_OUT" \
+            "${{ inputs.pkg_path }}"
+          ls -lah "$AAR_OUT"
 
       - name: Upload AAR
         uses: actions/upload-artifact@v4
