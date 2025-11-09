@@ -34,18 +34,18 @@ jobs:
         with:
           go-version: "1.22.x"
 
-      # --- Android SDK / cmdline-tools (надёжно) ---
+      # -------- Android SDK ----------
       - name: Prepare SDK folders
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
           mkdir -p "$ANDROID_SDK_ROOT"/{cmdline-tools/latest,platforms,platform-tools,build-tools,ndk}
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
 
       - name: Install cmdline-tools (resilient)
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
           cd "$ANDROID_SDK_ROOT"
           urls=(
             "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
@@ -53,26 +53,29 @@ jobs:
             "https://dl.google.com/android/repository/commandlinetools-linux-11079641_latest.zip"
             "https://dl.google.com/android/repository/commandlinetools-linux-10406996_latest.zip"
           )
-          ok=
+          ok=""
           for u in "${urls[@]}"; do
-            echo ">> try $u"
-            if curl -fsSL "$u" -o /tmp/cmdtools.zip; then ok=1; break; fi
+            echo "Trying: $u"
+            if curl -fL --retry 5 --retry-delay 2 "$u" -o /tmp/cmdtools.zip; then ok="1"; break; fi
           done
-          [ -n "$ok" ]
+          test -n "$ok"
           unzip -q /tmp/cmdtools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools/latest"
 
       - name: Accept SDK licenses (CI-safe)
         shell: bash
         run: |
-          set -eux
-          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+          set -euxo pipefail
+          for i in {1..6}; do
+            yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses && exit 0 || true
+            sleep 2
+          done
+          exit 1
 
       - name: Install SDK packages (robust)
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
           sdk="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-          # без --update, сразу нужные пакеты
           pkgs=(
             "platform-tools"
             "platforms;android-${ANDROID_API}"
@@ -81,8 +84,7 @@ jobs:
           )
           for i in {1..3}; do
             if yes | "$sdk" "${pkgs[@]}"; then exit 0; fi
-            echo "retry $i..."
-            sleep 3
+            echo "sdkmanager retry $i"; sleep 3
           done
           exit 1
 
@@ -90,44 +92,42 @@ jobs:
         id: ndk
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
           ndk_dir="$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}"
           test -d "$ndk_dir"
           echo "path=$ndk_dir" >> "$GITHUB_OUTPUT"
 
-      # --- gomobile / gobind ---
+      # -------- gomobile / gobind ----------
       - name: Install gomobile & gobind
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
           GOBIN="$(go env GOPATH)/bin"
           echo "$GOBIN" >> "$GITHUB_PATH"
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
-          "$GOBIN/gomobile" version || true
+          gomobile version || true
 
       - name: gomobile init (use Android SDK)
         shell: bash
         run: |
-          set -eux
-          GOBIN="$(go env GOPATH)/bin"
-          "$GOBIN/gomobile" init -androidsdk "$ANDROID_SDK_ROOT"
+          set -euxo pipefail
+          gomobile init -androidsdk "$ANDROID_SDK_ROOT"
 
-      # --- проект ---
-      - name: Tidy module (if pkg has go.mod)
+      # -------- проект / сборка AAR ----------
+      - name: Tidy module (if go.mod exists)
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
           if [ -f go.mod ]; then go mod tidy; fi
           if [ -f "${{ inputs.pkg_path }}/go.mod" ]; then (cd "${{ inputs.pkg_path }}" && go mod tidy); fi
 
       - name: Build AAR via gomobile bind
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
           mkdir -p "$(dirname "$AAR_OUT")"
-          GOBIN="$(go env GOPATH)/bin"
-          "$GOBIN/gomobile" bind \
+          gomobile bind \
             -target=android \
             -androidapi 26 \
             -o "$AAR_OUT" \
