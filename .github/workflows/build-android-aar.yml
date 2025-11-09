@@ -13,114 +13,154 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      ANDROID_SDK_ROOT: ${{ runner.temp }}/android-sdk
-      ANDROID_HOME: ${{ runner.temp }}/android-sdk
-      NDK_VERSION: 26.1.10909125
-      ANDROID_API: 34
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      ANDROID_HOME: /usr/local/lib/android/sdk
       AAR_OUT: build/android/outline.aar
+      # обновляем при необходимости, но этот NDK стабилен для gomobile
+      ANDROID_NDK_VERSION: "26.1.10909125"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      - name: Java 17 (Temurin)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Go 1.22
+      - name: Go 1.22
         uses: actions/setup-go@v5
         with:
           go-version: "1.22.x"
+          check-latest: true
 
-      # -------- Android SDK ----------
+      ######################################################################
+      # УСТАНОВКА cmdline-tools И SDK ПАКЕТОВ (без зависания на 10%)
+      ######################################################################
       - name: Prepare SDK folders
-        shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p "$ANDROID_SDK_ROOT"/{cmdline-tools/latest,platforms,platform-tools,build-tools,ndk}
+          sudo mkdir -p "$ANDROID_SDK_ROOT"
+          sudo chown -R "$USER":"$USER" "$ANDROID_SDK_ROOT"
+          mkdir -p "$ANDROID_SDK_ROOT"/{cmdline-tools,platforms,platform-tools,build-tools,ndk}
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
 
       - name: Install cmdline-tools (resilient)
         shell: bash
         run: |
           set -euxo pipefail
-          cd "$ANDROID_SDK_ROOT"
+          cd "$(mktemp -d)"
+
+          # Список актуальных (и несколько прошлых) архивов — пробуем по очереди,
+          # т.к. Google иногда меняет номер сборки.
           urls=(
-            "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+            "https://dl.google.com/android/repository/commandlinetools-linux-11076792_latest.zip"
+            "https://dl.google.com/android/repository/commandlinetools-linux-11076780_latest.zip"
+            "https://dl.google.com/android/repository/commandlinetools-linux-11076768_latest.zip"
             "https://dl.google.com/android/repository/commandlinetools-linux-11076702_latest.zip"
-            "https://dl.google.com/android/repository/commandlinetools-linux-11079641_latest.zip"
             "https://dl.google.com/android/repository/commandlinetools-linux-10406996_latest.zip"
           )
+
           ok=""
           for u in "${urls[@]}"; do
-            echo "Trying: $u"
-            if curl -fL --retry 5 --retry-delay 2 "$u" -o /tmp/cmdtools.zip; then ok="1"; break; fi
+            echo ">>> пробуем $u"
+            if curl -fsSL "$u" -o cmdtools.zip; then
+              if unzip -q cmdtools.zip -d cmdtools; then
+                ok="yes"; break
+              fi
+            fi
           done
-          test -n "$ok"
-          unzip -q /tmp/cmdtools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+
+          if [[ -z "$ok" ]]; then
+            echo "Не удалось скачать commandline-tools (Google обновил номер). Обнови URL в workflow."
+            exit 1
+          fi
+
+          # Кладём в $ANDROID_SDK_ROOT/cmdline-tools/latest (так ждёт sdkmanager)
+          rm -rf "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          mv cmdtools/cmdline-tools "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/build-tools/34.0.0" >> $GITHUB_PATH
 
       - name: Accept SDK licenses (CI-safe)
         shell: bash
         run: |
           set -euxo pipefail
-          for i in {1..6}; do
-            yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses && exit 0 || true
-            sleep 2
+          # Иногда падает с Broken pipe — оборачиваем в ретраи.
+          for i in {1..25}; do
+            yes | sdkmanager --licenses || true
+            sleep 1
+            # если всё принято — команда больше ничего не спрашивает и успешно завершается
+            if sdkmanager --licenses >/dev/null 2>&1; then
+              break
+            fi
           done
-          exit 1
+          # финальная проверка — фейлим, если не приняли
+          sdkmanager --licenses >/dev/null
 
-      - name: Install SDK packages (robust)
+      - name: Install Android packages (robust)
         shell: bash
         run: |
           set -euxo pipefail
-          sdk="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
           pkgs=(
             "platform-tools"
-            "platforms;android-${ANDROID_API}"
+            "platforms;android-34"
             "build-tools;34.0.0"
-            "ndk;${NDK_VERSION}"
+            "ndk;${ANDROID_NDK_VERSION}"
           )
-          for i in {1..3}; do
-            if yes | "$sdk" "${pkgs[@]}"; then exit 0; fi
-            echo "sdkmanager retry $i"; sleep 3
+
+          # sdkmanager иногда «залипает» на 10% — дадим несколько попыток
+          for p in "${pkgs[@]}"; do
+            for try in {1..4}; do
+              echo ">>> installing $p (try $try)"
+              if sdkmanager "$p"; then
+                break
+              fi
+              sleep 5
+              if [[ $try -eq 4 ]]; then
+                echo "Не удалось установить пакет $p"
+                exit 1
+              fi
+            done
           done
-          exit 1
 
       - name: Find installed NDK
         id: ndk
         shell: bash
         run: |
-          set -euxo pipefail
-          ndk_dir="$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}"
-          test -d "$ndk_dir"
-          echo "path=$ndk_dir" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          ndkdir="$(ls -d "$ANDROID_SDK_ROOT/ndk/"*/ | sort -V | tail -n1)"
+          echo "ndkdir=${ndkdir%/}" >> "$GITHUB_OUTPUT"
 
-      # -------- gomobile / gobind ----------
+      ######################################################################
+      # GOMOBILE
+      ######################################################################
       - name: Install gomobile & gobind
         shell: bash
         run: |
           set -euxo pipefail
-          GOBIN="$(go env GOPATH)/bin"
-          echo "$GOBIN" >> "$GITHUB_PATH"
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: gomobile init
+        shell: bash
+        run: |
+          set -euxo pipefail
           gomobile version || true
+          gomobile init -ndk "${{ steps.ndk.outputs.ndkdir }}"
 
-      - name: gomobile init (use Android SDK)
+      - name: Tidy module (if pkg has go.mod)
         shell: bash
         run: |
           set -euxo pipefail
-          gomobile init -androidsdk "$ANDROID_SDK_ROOT"
-
-      # -------- проект / сборка AAR ----------
-      - name: Tidy module (if go.mod exists)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          if [ -f go.mod ]; then go mod tidy; fi
-          if [ -f "${{ inputs.pkg_path }}/go.mod" ]; then (cd "${{ inputs.pkg_path }}" && go mod tidy); fi
+          if [ -f "${{ github.event.inputs.pkg_path }}/go.mod" ]; then
+            (cd "${{ github.event.inputs.pkg_path }}" && go mod tidy)
+          fi
 
       - name: Build AAR via gomobile bind
         shell: bash
@@ -131,11 +171,12 @@ jobs:
             -target=android \
             -androidapi 26 \
             -o "$AAR_OUT" \
-            "${{ inputs.pkg_path }}"
-          ls -lah "$AAR_OUT"
+            "${{ github.event.inputs.pkg_path }}"
+          test -s "$AAR_OUT"
 
       - name: Upload AAR
         uses: actions/upload-artifact@v4
         with:
           name: outline.aar
           path: ${{ env.AAR_OUT }}
+          if-no-files-found: error
