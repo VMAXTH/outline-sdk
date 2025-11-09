@@ -13,11 +13,10 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      ANDROID_SDK_ROOT: ${{ github.workspace }}/.android-sdk
-      ANDROID_HOME: ${{ github.workspace }}/.android-sdk
-      # версию NDK можно поменять при необходимости
-      ANDROID_NDK_VERSION: "26.1.10909125"
-      # что будем ставить из sdkmanager
+      # Используем предустановленный SDK раннера
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      # Что ставим через sdkmanager
       ANDROID_PACKAGES: >-
         platform-tools
         platforms;android-34
@@ -28,96 +27,44 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      - name: Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Set up Go 1.22
+      - name: Go 1.22
         uses: actions/setup-go@v5
         with:
           go-version: "1.22.x"
 
-      - name: Prepare folders
+      - name: Экспорт путей SDK в PATH
         shell: bash
         run: |
           set -eux
-          mkdir -p "$ANDROID_SDK_ROOT" "$ANDROID_SDK_ROOT/cmdline-tools"
-
-      ##########################################################################
-      # Ручная установка cmdline-tools (без нестабильных экшенов)
-      ##########################################################################
-      - name: Install cmdline-tools (latest)
-        shell: bash
-        run: |
-          set -eux
-          cd /tmp
-
-          # Несколько «кандидатов» на актуальный архив Google.
-          # Если первый 404 — берём следующий.
-          try_urls=(
-            "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
-            "https://dl.google.com/android/repository/commandlinetools-linux-11076702_latest.zip"
-            "https://dl.google.com/android/repository/commandlinetools-linux-10406996_latest.zip"
-          )
-
-          ok=""
-          for u in "${try_urls[@]}"; do
-            echo ">>> пробуем $u"
-            if curl -fsSL "$u" -o cmdtools.zip; then
-              if unzip -t q cmdtools.zip >/dev/null 2>&1; then
-                ok="yes"
-                break
-              fi
-            fi
-          done
-
-          if [ -z "$ok" ]; then
-            echo "Не удалось скачать commandlinetools (Google обновил номер). Обнови URL в workflow."
-            exit 1
-          fi
-
-          rm -rf "$ANDROID_SDK_ROOT/cmdline-tools/latest"
-          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools/latest"
-          unzip -q cmdtools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools/latest"
-          # На некоторых архивах внутри папка называется cmdline-tools, нормализуем:
-          if [ -d "$ANDROID_SDK_ROOT/cmdline-tools/latest/cmdline-tools" ]; then
-            mv "$ANDROID_SDK_ROOT/cmdline-tools/latest/cmdline-tools/"* "$ANDROID_SDK_ROOT/cmdline-tools/latest/" || true
-            rmdir "$ANDROID_SDK_ROOT/cmdline-tools/latest/cmdline-tools" || true
-          fi
-
           echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
 
-      ##########################################################################
-      # Самое важное — лицензии. Подаём бесконечный поток 'y', чтобы не было
-      # «Broken pipe» и падения на 10% Computing updates…
-      ##########################################################################
-      - name: Accept SDK licenses (robust)
+      - name: Принять лицензии (безотказно)
         shell: bash
         run: |
           set -eux
-          feed_yes() { while true; do printf 'y\n'; sleep 0.2; done; }
-          # иногда sdkmanager закрывает stdin по ходу, поэтому допускаем ненулевой возврат
+          feed_yes(){ while true; do printf 'y\n'; sleep 0.2; done; }
           feed_yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses || true
 
-      - name: Install Android packages (retry, robust)
+      - name: Установить Android пакеты (ретраи)
         shell: bash
         run: |
           set -eux
-          feed_yes() { while true; do printf 'y\n'; sleep 0.2; done; }
-
-          # несколько попыток — на CI зеркала Google иногда хлопают
+          feed_yes(){ while true; do printf 'y\n'; sleep 0.2; done; }
           tries=0
           until feed_yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" ${ANDROID_PACKAGES}; do
             tries=$((tries+1))
             [ $tries -ge 3 ] && { echo "sdkmanager провалился 3 раза"; exit 1; }
-            echo "Повтор через 5 секунд…"
-            sleep 5
+            echo "Повтор через 5 секунд…"; sleep 5
           done
 
-      - name: Export ANDROID_NDK_* envs
+      - name: Найти установленный NDK
         id: ndk
         shell: bash
         run: |
@@ -126,7 +73,7 @@ jobs:
           echo "NDK_DIR=$ndk_dir" >> $GITHUB_ENV
           echo "$ndk_dir/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
 
-      - name: Install gomobile & gobind
+      - name: Установить gomobile/gobind
         shell: bash
         run: |
           set -eux
@@ -143,7 +90,7 @@ jobs:
           gomobile version || true
           gomobile init -ndk "$NDK_DIR"
 
-      - name: Tidy module (если есть go.mod)
+      - name: go mod tidy (если есть go.mod)
         if: ${{ hashFiles(format('{0}/go.mod', inputs.pkg_path)) != '' }}
         shell: bash
         run: |
@@ -152,7 +99,7 @@ jobs:
           go mod tidy
           popd
 
-      - name: Build AAR via gomobile bind
+      - name: Сборка AAR
         shell: bash
         run: |
           set -eux
@@ -163,7 +110,7 @@ jobs:
             -o build/android/outline.aar \
             "${{ inputs.pkg_path }}"
 
-      - name: Upload AAR
+      - name: Загрузить артефакт
         uses: actions/upload-artifact@v4
         with:
           name: outline.aar
