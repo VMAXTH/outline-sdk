@@ -4,22 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       pkg_path:
-        description: 'Go-пакет для gomobile (например: ./x/mobileproxy)'
+        description: "Go-пакет для gomobile (пример: ./x/mobileapi)"
         required: true
-        default: ./x/mobileproxy
+        default: ./x/mobileapi
 
 jobs:
   build-aar:
     runs-on: ubuntu-latest
-
-    env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-      ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk
-      GOPROXY: https://proxy.golang.org,direct
-      GOSUMDB: sum.golang.org
-      CGO_ENABLED: "1"
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,105 +19,98 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: 17
 
       - name: Set up Go 1.22
         uses: actions/setup-go@v5
         with:
           go-version: "1.22.x"
 
-      # --- Android SDK/NDK (ручная установка, без flaky-экшенов) ---
       - name: Prepare SDK folders
         run: |
-          set -eux
-          sudo mkdir -p "$ANDROID_HOME"/{cmdline-tools/latest,platforms,build-tools,ndk}
-          sudo chown -R $USER:$USER "$ANDROID_HOME"
+          set -euxo pipefail
+          sudo mkdir -p /usr/local/lib/android/sdk
+          sudo chown -R "$USER:$USER" /usr/local/lib/android
+          mkdir -p "$HOME/.android"
+          touch "$HOME/.android/repositories.cfg"
 
       - name: Install cmdline-tools (resilient)
+        env:
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
         run: |
           set -euxo pipefail
-          cd "$ANDROID_HOME/cmdline-tools"
-          base="https://dl.google.com/android/repository"
-          # несколько кандидатов — берем первый доступный
-          for z in \
-            commandlinetools-linux-11076708_latest.zip \
-            commandlinetools-linux-11079641_latest.zip \
-            commandlinetools-linux-11076729_latest.zip
-          do
-            if curl -fsSL "$base/$z" -o /tmp/cmdtools.zip; then
-              break
-            fi
+          cd "$ANDROID_SDK_ROOT"
+          mkdir -p cmdline-tools/latest
+          try_urls=(
+            "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+            "https://dl.google.com/android/repository/commandlinetools-linux-11076702_latest.zip"
+            "https://dl.google.com/android/repository/commandlinetools-linux-11079641_latest.zip"
+            "https://dl.google.com/android/repository/commandlinetools-linux-11086966_latest.zip"
+            "https://dl.google.com/android/repository/commandlinetools-linux-11046996_latest.zip"
+          )
+          ok=false
+          for u in "${try_urls[@]}"; do
+            if curl -fsSL "$u" -o /tmp/cmdtools.zip; then ok=true; break; fi
+            sleep 1
           done
-          unzip -q /tmp/cmdtools.zip -d latest
-          rm -f /tmp/cmdtools.zip
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          if [ "$ok" != true ]; then
+            echo 'Не удалось скачать commandlinetools (Google обновил номер). Обнови URL в workflow.' >&2
+            exit 1
+          fi
+          unzip -q /tmp/cmdtools.zip -d cmdline-tools/latest
+          rm /tmp/cmdtools.zip
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "PATH=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH" >> "$GITHUB_ENV"
 
       - name: Accept SDK licenses (CI-safe)
         run: |
-          set -eux
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+          set -euxo pipefail
+          yes | sdkmanager --licenses >/dev/null
 
       - name: Install Android packages (robust)
+        env:
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
         run: |
           set -euxo pipefail
-          PKGS=(
-            "platform-tools"
-            "platforms;android-34"
-            "build-tools;34.0.0"
-            "ndk;28.2.13673558"
-          )
-          for p in "${PKGS[@]}"; do
-            for i in {1..4}; do
-              "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "$p" && break || sleep 5
-            done
-          done
+          retry() { n=0; until [ $n -ge 3 ]; do "$@" && break; n=$((n+1)); sleep 2; done; }
+          retry sdkmanager "platform-tools" >/dev/null
+          retry sdkmanager "build-tools;34.0.0" "platforms;android-34" >/dev/null
+          retry sdkmanager "ndk;28.2.13673558" >/dev/null
 
       - name: Locate NDK
-        id: ndk
         run: |
-          set -eux
-          NDK_DIR=$(ls -d "$ANDROID_HOME/ndk/"*/ | sort | tail -n1)
-          echo "NDK=$NDK_DIR" >> "$GITHUB_OUTPUT"
+          set -euxo pipefail
+          NDK_DIR=$(ls -d /usr/local/lib/android/sdk/ndk/* | sort -V | tail -1)
           echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
 
-      # --- gomobile & bind ---
       - name: Install gomobile & gobind
         run: |
-          set -eux
+          set -euxo pipefail
+          go env -w GOINSECURE=golang.org
           go install golang.org/x/mobile/cmd/gomobile@latest
-          # заранее тянем bind-пакет, чтобы не было "no Go package in golang.org/x/mobile/bind"
-          go get golang.org/x/mobile/bind@latest
-          go env
+          go install golang.org/x/mobile/cmd/gobind@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: gomobile init
         run: |
-          set -eux
-          "$HOME/go/bin/gomobile" init -ndk "${{ steps.ndk.outputs.NDK }}"
+          set -euxo pipefail
+          gomobile version || true
+          gomobile init -ndk "$ANDROID_NDK_HOME"
 
-      # --- go mod tidy в корне (если есть) и в самом пакете ---
-      - name: go mod tidy (root)
+      - name: Tidy module (если у пакета есть go.mod)
         run: |
-          set -eux
-          if [ -f go.mod ]; then
+          set -euxo pipefail
+          if [ -f "${{ github.event.inputs.pkg_path }}/go.mod" ]; then
+            (cd "${{ github.event.inputs.pkg_path }}" && go mod tidy)
+          else
             go mod tidy
           fi
 
-      - name: go mod tidy (package)
-        run: |
-          set -eux
-          PKG="${{ github.event.inputs.pkg_path }}"
-          if [ -f "$PKG/go.mod" ]; then
-            (cd "$PKG" && go mod tidy)
-          fi
-
-      # --- сборка AAR ---
       - name: Build AAR via gomobile bind
         run: |
-          set -eux
+          set -euxo pipefail
           mkdir -p build/android
-          "$HOME/go/bin/gomobile" bind \
-            -target=android \
-            -androidapi=26 \
+          gomobile bind -target=android -androidapi=26 \
             -o build/android/outline.aar \
             "${{ github.event.inputs.pkg_path }}"
 
@@ -135,3 +119,4 @@ jobs:
         with:
           name: outline.aar
           path: build/android/outline.aar
+          if-no-files-found: error
