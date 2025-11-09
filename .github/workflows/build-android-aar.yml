@@ -123,6 +123,17 @@ jobs:
             popd
           fi
 
+            - name: Pull x/mobile/bind into go.mod (and tidy)
+        shell: bash
+        run: |
+          set -eux
+          # нормальный прокси + суммаризатор
+          go env -w GOPROXY=https://proxy.golang.org,direct
+          go env -w GOSUMDB=sum.golang.org
+          # подтянуть библиотеку, которую использует gomobile bind
+          go get golang.org/x/mobile/bind@latest
+          go mod tidy
+
       - name: Build AAR via gomobile bind
         shell: bash
         env:
@@ -131,6 +142,7 @@ jobs:
           set -eux
           mkdir -p build/android
           gomobile bind -target=android -androidapi 26 -o "$AAR_OUT" "${{ github.event.inputs.pkg_path }}"
+
 
       - name: Upload AAR
         uses: actions/upload-artifact@v4
