@@ -6,114 +6,41 @@ on:
       pkg_path:
         description: "Go-пакет для gomobile (например: ./x/mobileproxy)"
         required: true
-        default: ./x/mobileproxy
+        default: "./x/mobileproxy"
 
 jobs:
   build-aar:
     runs-on: ubuntu-latest
 
-    # Готовый образ с Android SDK и cmdline-tools — не придется их ставить.
-    container: ghcr.io/cirruslabs/android-sdk:34
-
-    env:
-      ANDROID_SDK_ROOT: /opt/android-sdk
-      ANDROID_HOME: /opt/android-sdk
-      AAR_OUT: build/android/outline.aar
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java 17 (Temurin)
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-
-      - name: Set up Go 1.22
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.22.x"
-          cache: true
-
-      # Иногда sdkmanager капризничает — делаем несколько попыток.
-      - name: Accept SDK licenses (CI-safe)
-        shell: bash
+      - name: Build gomobile image
         run: |
-          set -euo pipefail
-          for i in {1..5}; do
-            yes | sdkmanager --licenses && exit 0
-            echo "Retry licenses ($i/5)"; sleep 2
-          done
-          exit 1
+          docker build -t gomobile-android -f docker/gomobile/Dockerfile .
 
-      - name: Install Android packages (robust)
-        shell: bash
-        run: |
-          set -euo pipefail
-          pkgs=(
-            "platforms;android-34"
-            "build-tools;34.0.0"
-            "ndk;26.1.10909125"
-          )
-          for p in "${pkgs[@]}"; do
-            for i in {1..5}; do
-              sdkmanager "$p" && break || {
-                echo "Retry $p ($i/5)"; sleep 2
-              }
-              if [[ $i -eq 5 ]]; then
-                echo "Failed to install $p"; exit 1
-              fi
-            done
-          done
-
-      - name: Locate NDK and export env
-        shell: bash
-        run: |
-          set -euo pipefail
-          ndk_dir="$(ls -d "$ANDROID_SDK_ROOT/ndk/"* | sort -V | tail -n1)"
-          echo "ANDROID_NDK_HOME=$ndk_dir" | tee -a "$GITHUB_ENV"
-          echo "NDK detected: $ndk_dir"
-
-      - name: Install gomobile & gobind
-        shell: bash
-        run: |
-          set -eux
-          go env -w GOPROXY=https://proxy.golang.org,direct
-          go env -w GOSUMDB=sum.golang.org
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
-          echo "${HOME}/go/bin" >> $GITHUB_PATH
-
-      - name: Pull x/mobile/bind into go.mod (and tidy)
-        shell: bash
-        run: |
-          set -eux
-          # Добавляем зависимость, которую использует 'gomobile bind'
-          go get golang.org/x/mobile/bind@latest
-          go mod tidy
-
-      - name: gomobile init (with NDK)
-        shell: bash
-        run: |
-          set -eux
-          gomobile version || true
-          gomobile init -ndk "${ANDROID_NDK_HOME}"
-
-      - name: Build AAR via gomobile bind
-        shell: bash
-        env:
-          CGO_ENABLED: "1"
+      - name: Bind → AAR
         run: |
           set -eux
           mkdir -p build/android
-          gomobile bind -target=android -androidapi 26 -o "$AAR_OUT" "${{ github.event.inputs.pkg_path }}"
-          ls -l build/android
+          docker run --rm \
+            -v "${{ github.workspace }}:/work" \
+            -w "/work" \
+            gomobile-android \
+            bash -lc '
+              set -eux
+              go get golang.org/x/mobile/bind@latest
+              go mod tidy
+              gomobile init -ndk "$ANDROID_SDK_ROOT/ndk/26.1.10909125"
+              gomobile bind -target=android -androidapi 26 \
+                -o build/android/outline.aar \
+                "${{ inputs.pkg_path }}"
+              ls -la build/android
+            '
 
       - name: Upload AAR
-        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: outline.aar
+          name: outline-aar
           path: build/android/outline.aar
-          if-no-files-found: error
