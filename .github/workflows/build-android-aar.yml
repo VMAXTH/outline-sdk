@@ -4,43 +4,39 @@ on:
   workflow_dispatch:
     inputs:
       pkg_path:
-        description: "Go-пакет для gomobile (например: ./x/mobileproxy)"
+        description: 'Go-пакет для gomobile (например: ./x/mobileproxy)'
         required: true
-        default: "./x/mobileproxy"
+        default: ./x/mobileproxy
 
 jobs:
   build-aar:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout (с сабмодулями)
         uses: actions/checkout@v4
+        with:
+          submodules: true
 
-      - name: Build gomobile image
+      - name: Сборка Docker-образа gomobile
         run: |
-          docker build -t gomobile-android -f docker/gomobile/Dockerfile .
+          docker build -t gomobile-builder -f docker/gomobile/Dockerfile .
 
-      - name: Bind → AAR
+      - name: Связать пакет → AAR
+        env:
+          PKG: ${{ github.event.inputs.pkg_path }}
         run: |
-          set -eux
+          set -euo pipefail
           mkdir -p build/android
-          docker run --rm \
-            -v "${{ github.workspace }}:/work" \
-            -w "/work" \
-            gomobile-android \
-            bash -lc '
-              set -eux
-              go get golang.org/x/mobile/bind@latest
-              go mod tidy
-              gomobile init -ndk "$ANDROID_SDK_ROOT/ndk/26.1.10909125"
-              gomobile bind -target=android -androidapi 26 \
-                -o build/android/outline.aar \
-                "${{ inputs.pkg_path }}"
-              ls -la build/android
-            '
+          docker run --rm -v "$PWD":/work gomobile-builder bash -lc '
+            set -euo pipefail
+            cd /work
+            if [ -f "$PKG/go.mod" ]; then (cd "$PKG" && /usr/local/go/bin/go mod tidy); fi
+            /go/bin/gomobile bind -target=android -androidapi 26 -o build/android/outline.aar "$PKG"
+          '
 
-      - name: Upload AAR
+      - name: Загрузка артефакта
         uses: actions/upload-artifact@v4
         with:
-          name: outline-aar
+          name: outline.aar
           path: build/android/outline.aar
